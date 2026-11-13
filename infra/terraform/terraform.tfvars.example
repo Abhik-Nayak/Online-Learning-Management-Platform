@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and edit the values:
+#   cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is git-ignored.
+
+region        = "ap-south-1"
+project       = "lms"
+instance_type = "t2.micro"
+
+# Public IP of the Management Server + /32.
+# On the Management Server, get it with:  curl -s https://checkip.amazonaws.com
+mgmt_cidr = "13.201.69.23/32"
+
+# Public key created on the Management Server with:
+#   ssh-keygen -t rsa -b 4096 -f ~/.ssh/lms_key -N ""
+public_key_path = "~/.ssh/lms_key.pub"
