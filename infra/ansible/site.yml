@@ -1,0 +1,7 @@
+# Everything, in order: DB first (the app's health check needs it), then the app servers.
+#   ansible-playbook site.yml
+- name: Database
+  ansible.builtin.import_playbook: db.yml
+
+- name: App servers
+  ansible.builtin.import_playbook: app.yml

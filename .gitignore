@@ -6,3 +6,11 @@ crash.log
 
 # Keys
 *.pem
+
+# Ansible (generated / secret)
+infra/ansible/inventory.ini
+infra/ansible/group_vars/all/vault.yml
+.vault_pass
+
+# Node
+node_modules/

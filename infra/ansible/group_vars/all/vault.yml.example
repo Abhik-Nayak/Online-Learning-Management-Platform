@@ -1,0 +1,5 @@
+# Template for group_vars/all/vault.yml (the real file is git-ignored).
+# Create the encrypted file on the Management Server with:
+#   ansible-vault create group_vars/all/vault.yml
+# and put this line in it with a strong password:
+vault_db_password: "change-me"

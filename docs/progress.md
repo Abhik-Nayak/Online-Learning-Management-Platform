@@ -173,3 +173,146 @@ Everything below runs **on the Management Server**.
 - Cost: 3 × t2.micro (free-tier eligible for 750 hours/month in total, so 3 running all month exceeds it). No NAT Gateway and no Elastic IPs.
 - To remove everything Terraform created: `terraform destroy` (on the Management Server, in `infra/terraform`). This does **not** touch the Management Server.
 - Verified on the laptop: `terraform fmt`, `terraform validate`, and a read-only `terraform plan` (16 to add; AMI `ami-009a37f62c7ea3f0a`, AZs ap-south-1a / ap-south-1b). Nothing was applied from the laptop.
+
+---
+
+## Task 2 - Ansible
+
+Ansible (on the Management Server) installs PostgreSQL on `lms-db`, and Docker + nginx on `lms-app-1` / `lms-app-2`,
+then builds and runs the app container on both app servers.
+
+```
+Browser ──:80──> nginx (app1 / app2) ──127.0.0.1:3000──> lms-app container ──:5432 (DB private IP)──> PostgreSQL (db1)
+```
+
+- Ansible connects to the servers over their **public** IPs (SSH, key `~/.ssh/lms_key`).
+- The app connects to the DB over its **private** IP (`10.0.3.x`). Only the app subnets are allowed, in both `pg_hba.conf` and `lms-db-sg`.
+
+### Files created
+
+| File | Purpose |
+|---|---|
+| `public/index.html` | The original `index.html`, moved unchanged, plus a status bar at the bottom that calls `/api/db-health` and shows "DB: connected \| served by app1" (green) or the error (red). |
+| `server.js` | Express server: serves `public/`, `GET /api/health`, `GET /api/db-health` (runs `SELECT now(), version()`). DB settings only from env vars `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`. |
+| `package.json` / `package-lock.json` | Dependencies: `express`, `pg` (exact versions locked). |
+| `Dockerfile` | `node:20-alpine`, `npm ci --omit=dev`, runs as the non-root `node` user, `EXPOSE 3000`, `HEALTHCHECK` on `/api/health`. |
+| `.dockerignore` | Keeps `node_modules`, `.git`, `infra/`, `docs/` out of the image. |
+| `.gitattributes` | Forces LF line endings on `*.sh` so scripts committed from Windows run on Linux. |
+| `infra/ansible/ansible.cfg` | Inventory, `ubuntu` user, `~/.ssh/lms_key`, no host-key prompt, vault password file `~/.vault_pass`. |
+| `infra/ansible/gen_inventory.sh` | Reads `terraform output -json` and writes `inventory.ini` (`[app]` app1, app2 / `[db]` db1, with `private_ip`). |
+| `infra/ansible/inventory.ini.example` | Example of the generated inventory (the real one is git-ignored). |
+| `infra/ansible/group_vars/all/main.yml` | Shared variables: DB name/user/port, `db_host` (= DB private IP from the inventory), app port, image, container name, repo URL. |
+| `infra/ansible/group_vars/all/vault.yml.example` | Template for the encrypted `vault.yml` that holds `vault_db_password` (the real file is git-ignored). |
+| `infra/ansible/ping.yml` | Pings all hosts and prints hostname, public IP and private IP. |
+| `infra/ansible/db.yml` | Installs PostgreSQL 14, `listen_addresses='*'`, `pg_hba.conf` rules for the app subnets (scram-sha-256), creates the user and database, restarts via a handler, prints `pg_lsclusters`. |
+| `infra/ansible/app.yml` | Installs Docker, nginx and git; clones the repo to `/opt/lms`; builds `lms-app:latest`; runs the container (`restart: always`, `127.0.0.1:3000`); nginx site (`:80` to the container); checks `/api/health` and `/api/db-health` return 200. |
+| `infra/ansible/templates/lms.nginx.conf.j2` | nginx site: `listen 80` and `proxy_pass http://127.0.0.1:{{ app_port }}`. |
+| `infra/ansible/site.yml` | Runs `db.yml` then `app.yml`. |
+
+> `group_vars/all.yml` from the spec became `group_vars/all/main.yml`: Ansible does not load an `all.yml` file
+> when an `all/` folder (needed for `vault.yml`) exists next to it.
+
+**Secrets:** the DB password exists only in `group_vars/all/vault.yml` (AES-256 encrypted with ansible-vault) and in
+`~/.vault_pass` on the Management Server. Neither is in git. Tasks that handle the password use `no_log: true`.
+
+### What runs where
+
+| Step | Runs on |
+|---|---|
+| App + Ansible code, local tests, `git push` | **Laptop** |
+| `git pull`, `gen_inventory.sh`, vault, all `ansible-playbook` commands | **Management Server** |
+| PostgreSQL | **lms-db** (set up by Ansible) |
+| `git clone`, `docker build`, container, nginx | **lms-app-1 / lms-app-2** (set up by Ansible) |
+| Final check | **Browser** on the laptop |
+
+### Commands – in order
+
+**On the laptop:** push the code (the app servers `git clone` it from GitHub):
+
+```bash
+git add -A
+git commit -m "Task 2: Ansible + DB-aware app"
+git push origin master
+```
+
+Everything below runs **on the Management Server** (`ssh -i ~/.ssh/lms-mgmt.pem ubuntu@<mgmt-ip>`).
+
+1. Install Ansible and jq (skip if `ansible --version` already shows core 2.17):
+   ```bash
+   sudo add-apt-repository --yes --update ppa:ansible/ansible
+   sudo apt-get install -y ansible jq
+   ansible --version
+   ```
+
+2. Get the new code:
+   ```bash
+   cd ~/Online-Learning-Management-Platform
+   git pull
+   cd infra/ansible
+   ```
+
+3. Generate the inventory from Terraform:
+   ```bash
+   ./gen_inventory.sh
+   ```
+
+4. Create the vault password file and the encrypted DB password (only once):
+   ```bash
+   openssl rand -base64 32 > ~/.vault_pass
+   chmod 600 ~/.vault_pass
+
+   DB_PW=$(openssl rand -base64 24 | tr -d '/+=')
+   printf 'vault_db_password: "%s"\n' "$DB_PW" > group_vars/all/vault.yml
+   ansible-vault encrypt group_vars/all/vault.yml
+   unset DB_PW
+   head -1 group_vars/all/vault.yml        # must print $ANSIBLE_VAULT;1.1;AES256
+   ```
+   (To view or change it later: `ansible-vault view group_vars/all/vault.yml` / `ansible-vault edit ...`.)
+
+5. Connectivity check:
+   ```bash
+   ansible-playbook ping.yml
+   ```
+   📸 **Screenshot 1:** the `./gen_inventory.sh` output and the `ping.yml` output (hostname/IPs for app1, app2, db1 and `PLAY RECAP` with `failed=0`).
+
+6. Database:
+   ```bash
+   ansible-playbook db.yml
+   ```
+   📸 **Screenshot 2:** the `Show pg_lsclusters` task (`14 main 5432 online`) and the `PLAY RECAP`.
+
+7. App servers:
+   ```bash
+   ansible-playbook app.yml
+   ```
+   📸 **Screenshot 3:** the `Show results` task for app1 and app2 (`"db": "connected"`, `served_by`) and the `PLAY RECAP`.
+
+8. Idempotency: run everything again; nothing should change:
+   ```bash
+   ansible-playbook site.yml
+   ```
+   📸 **Screenshot 4:** the `PLAY RECAP` with `changed=0` for all hosts.
+
+9. **Browser (laptop):** open `http://<app_1_public_ip>` and `http://<app_2_public_ip>`
+   (`terraform -chdir=../terraform output` shows them).
+   📸 **Screenshot 5:** both pages with the green bar "DB: connected | served by app1" / "... app2".
+   Optional: `http://<app_1_public_ip>/api/db-health` shows the raw JSON.
+
+### Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| `ping.yml` "UNREACHABLE" | The Management Server's public IP changed: update `mgmt_cidr` in `terraform.tfvars`, `terraform apply`. |
+| `/api/db-health` 500 "timeout" | `lms-db-sg` / `listen_addresses`: run `db.yml` again, then `ssh` to db1: `sudo ss -ltnp \| grep 5432` should show `0.0.0.0:5432`. |
+| `/api/db-health` 500 "password authentication failed" | The vault password changed after the user was created: run `ansible-playbook site.yml` (it resets the DB password). |
+| Container logs | On an app server: `sudo docker logs lms-app` |
+
+### Verified on the laptop (before pushing)
+
+- `node server.js` with no DB: `/` 200, `/api/health` 200, `/api/db-health` 500 `"DB_HOST is not set"`.
+- Docker image built and run against a `postgres:14-alpine` container (scram-sha-256): `/api/db-health` 200 `"db":"connected"`,
+  container runs as `uid=1000(node)`, Docker health status `healthy`; DB stopped: 500 after a 3 s timeout.
+- In a container with ansible-core 2.17.14 (community.postgresql 3.9.0, community.docker 3.13.3):
+  `gen_inventory.sh` (with fake terraform output), vault decryption, `db_host` = DB private IP,
+  `--syntax-check` on all playbooks, and `ansible-lint`: 0 failures, 0 warnings (production profile).
+- **Not** run against the real servers yet: that is steps 1–9 above.

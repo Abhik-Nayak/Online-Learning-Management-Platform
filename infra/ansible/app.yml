@@ -1,0 +1,127 @@
+# App servers: Docker container behind nginx.
+#   ansible-playbook app.yml
+# Flow: browser -> nginx :80 -> container 127.0.0.1:3000 -> PostgreSQL (DB private IP)
+- name: Deploy the LMS app
+  hosts: app
+  become: true
+
+  tasks:
+    - name: Install Docker, the Docker Python SDK, nginx and git
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - python3-docker
+          - nginx
+          - git
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Make sure Docker is running and starts on boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Let the ubuntu user run docker without sudo
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    # ---------------------------------------------------------------- Code + image
+    - name: Clone or update the repo in {{ app_dir }}
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ repo_branch }}"
+        force: true # discard any local edits on the server
+      register: repo
+
+    - name: Build the Docker image (only when the code changed or the image is missing)
+      community.docker.docker_image:
+        name: "{{ app_image }}"
+        source: build
+        build:
+          path: "{{ app_dir }}"
+        force_source: "{{ repo.changed }}"
+
+    # docker_container recreates the container automatically if the image ID changed.
+    - name: Run the app container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ app_image }}"
+        state: started
+        restart_policy: always
+        hostname: "{{ inventory_hostname }}" # shows as "served by app1/app2" in the page
+        published_ports:
+          - "127.0.0.1:{{ app_port }}:3000" # only nginx can reach it
+        env:
+          PORT: "3000"
+          DB_HOST: "{{ db_host }}"
+          DB_PORT: "{{ db_port | string }}"
+          DB_NAME: "{{ db_name }}"
+          DB_USER: "{{ db_user }}"
+          DB_PASSWORD: "{{ db_password }}"
+      no_log: true # the env block contains the DB password
+
+    # ---------------------------------------------------------------- nginx
+    - name: Install the nginx site
+      ansible.builtin.template:
+        src: templates/lms.nginx.conf.j2
+        dest: /etc/nginx/sites-available/lms
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Enable the site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/lms
+        dest: /etc/nginx/sites-enabled/lms
+        state: link
+      notify: Reload nginx
+
+    - name: Remove the default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Make sure nginx is running and starts on boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Run pending handlers
+      ansible.builtin.meta: flush_handlers
+
+    # ---------------------------------------------------------------- Checks
+    - name: Check /api/health through nginx
+      ansible.builtin.uri:
+        url: http://localhost/api/health
+        return_content: true
+      register: health
+      until: health.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Check /api/db-health through nginx
+      ansible.builtin.uri:
+        url: http://localhost/api/db-health
+        return_content: true
+      register: db_health
+      until: db_health.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Show results
+      ansible.builtin.debug:
+        msg:
+          - "{{ health.json }}"
+          - "{{ db_health.json }}"
+
+  handlers:
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

@@ -1,0 +1,17 @@
+{
+  "name": "lms-app",
+  "version": "1.0.0",
+  "description": "LearnHub - Online Learning Management Platform",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.0"
+  }
+}

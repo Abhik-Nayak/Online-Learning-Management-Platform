@@ -1,0 +1,24 @@
+# Variables shared by every host (group_vars/all/main.yml).
+# The secret db password is in vault.yml in this same folder.
+
+# --- Database
+db_name: lms_db
+db_user: lms_user
+db_port: 5432
+# The app reaches the DB over its PRIVATE IP (from inventory.ini).
+db_host: "{{ hostvars[groups['db'][0]]['private_ip'] }}"
+# The secret lives in group_vars/all/vault.yml (ansible-vault encrypted, not in git).
+db_password: "{{ vault_db_password }}"
+
+# Subnets of the app servers: the only networks allowed to log in to PostgreSQL.
+app_subnets:
+  - 10.0.1.0/24
+  - 10.0.2.0/24
+
+# --- App
+app_port: 3000
+app_image: lms-app:latest
+container_name: lms-app
+app_dir: /opt/lms
+repo_url: https://github.com/Abhik-Nayak/Online-Learning-Management-Platform.git
+repo_branch: master

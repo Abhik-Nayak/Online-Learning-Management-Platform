@@ -345,3 +345,28 @@
       padding: 35px 7%;
     }
 
+
+<!-- DB status bar (Task 2): calls /api/db-health and shows which server answered. -->
+<div id="db-status" style="position:fixed;left:0;right:0;bottom:0;z-index:9999;padding:8px 16px;font:13px Arial,sans-serif;text-align:center;color:#fff;background:#64748b;">
+  DB: checking...
+</div>
+<script>
+  (function () {
+    var bar = document.getElementById("db-status");
+    function show(ok, text) {
+      bar.style.background = ok ? "#15803d" : "#b91c1c";
+      bar.textContent = text;
+    }
+    function check() {
+      fetch("/api/db-health", { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.db === "connected") show(true, "DB: connected | served by " + d.served_by);
+          else show(false, "DB: error | " + d.message + (d.served_by ? " | served by " + d.served_by : ""));
+        })
+        .catch(function (e) { show(false, "DB: error | " + e.message); });
+    }
+    check();
+    setInterval(check, 10000);
+  })();
+</script>

@@ -1,0 +1,86 @@
+# PostgreSQL on the DB server.
+#   ansible-playbook db.yml
+- name: Configure PostgreSQL
+  hosts: db
+  become: true
+
+  tasks:
+    - name: Install PostgreSQL and the Python driver Ansible needs
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+          - python3-psycopg2
+          - acl # lets Ansible run tasks as the postgres user
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Find the installed PostgreSQL version (14 on Ubuntu 22.04)
+      ansible.builtin.find:
+        paths: /etc/postgresql
+        file_type: directory
+      register: pg_versions
+
+    - name: Remember the config directory
+      ansible.builtin.set_fact:
+        pg_conf_dir: "{{ (pg_versions.files | map(attribute='path') | sort | last) }}/main"
+
+    - name: Make sure PostgreSQL is running and starts on boot
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Listen on all interfaces (db-sg still only allows the app servers)
+      community.postgresql.postgresql_set:
+        name: listen_addresses
+        value: "*"
+      become: true
+      become_user: postgres
+      notify: Restart PostgreSQL
+
+    - name: Allow the app subnets to reach the DB with a password (pg_hba.conf)
+      community.postgresql.postgresql_pg_hba:
+        dest: "{{ pg_conf_dir }}/pg_hba.conf"
+        contype: host
+        databases: "{{ db_name }}"
+        users: "{{ db_user }}"
+        source: "{{ item }}"
+        method: scram-sha-256
+      loop: "{{ app_subnets }}"
+      notify: Restart PostgreSQL
+
+    - name: Create the application user
+      community.postgresql.postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+      become: true
+      become_user: postgres
+      no_log: true # keep the password out of the output
+
+    - name: Create the application database
+      community.postgresql.postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+      become: true
+      become_user: postgres
+
+    # Apply config changes now, before the final check.
+    - name: Run pending handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check the cluster status
+      ansible.builtin.command: pg_lsclusters
+      register: clusters
+      changed_when: false
+
+    - name: Show pg_lsclusters
+      ansible.builtin.debug:
+        var: clusters.stdout_lines
+
+  handlers:
+    - name: Restart PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted
